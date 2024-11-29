@@ -1,0 +1,86 @@
+%% @doc A logger report handler that be used to capture expected errors in
+%% tests. The current error report handlers are disabled during the execution
+%% of a function. Afterwards, they are restored and the errors that occered are
+%% returned along with the return value of the fun.
+-module(logger_acc).
+
+%% Public API
+-export([capture/1]).
+
+%% @doc Executes `Fun' and captures all logged errors returns as well as
+%% uncaught errors in `Fun'.
+-spec capture(fun (() -> ResultOfFun)) ->
+    {ok, ResultOfFun, AccumulatedErrors} |
+    {throw | error | exit, Reason, Trace, AccumulatedErrors}
+  when ResultOfFun :: term(),
+       Reason :: term(),
+       Trace :: list(),
+       AccumulatedErrors :: [{error|warning_msg|info_msg, string()} |
+                             {error_report|warning_report|info_report, term()}].
+capture(Fun) when is_function(Fun, 0) ->
+    Tag = make_ref(),
+    AccPid = spawn_link(fun() -> log_acc_loop(Tag, []) end),
+    logger:add_primary_filter(?MODULE, {fun(Event, _)-> AccPid ! {Tag, Event}, stop end, undefined}),
+    try
+        Fun()
+    of
+        Result ->
+            Events = flush_logs(AccPid, Tag),
+            {ok, Result, Events}
+    catch
+        Class:Error:Stacktrace ->
+            Events = flush_logs(AccPid, Tag),
+            {Class, Error, Stacktrace, Events}
+    after
+        ok = logger:remove_primary_filter(?MODULE)
+    end.
+
+flush_logs(AccPid, Tag) ->
+    AccMon = monitor(process, AccPid),
+    AccPid ! {Tag, flush, self()},
+    receive
+        {Tag, Events} ->
+            demonitor(AccMon, [flush]),
+            Events;
+        {'DOWN', AccMon, process, AccPid, Reason} ->
+            error({accumulator_process, Reason})
+    end.
+
+log_acc_loop(Tag, Acc) ->
+    receive
+        {Tag, flush, ReplyTo} ->
+            ReplyTo ! {Tag, lists:reverse(Acc)};
+        {Tag, #{level := Level, msg := Msg} = Event} ->
+            Domain = case Event of
+                         #{meta := #{domain := D}} -> D;
+                         #{} -> []
+                     end,
+            Message = case Msg of
+                          {string, Str} -> Str;
+                          {report, Report} -> Report;
+                          {Fmt, Args} -> lists:flatten(io_lib:format(Fmt, Args))
+                      end,
+            log_acc_loop(Tag, [{Level, Domain, Message} | Acc]);
+        _Other ->
+            log_acc_loop(Tag, Acc)
+    end.
+
+-ifdef(TEST).
+-include_lib("eunit/include/eunit.hrl").
+
+capture_success_test() ->
+    Result = ?MODULE:capture(fun () ->
+        logger:notice("Hello ~p", [world]),
+        logger:notice("Hello ~p", [again]),
+        foo
+    end),
+    ?assertEqual({ok, foo, [{notice, [], "Hello world"}, {notice, [], "Hello again"}]}, Result).
+
+capture_failure_test() ->
+    Result = ?MODULE:capture(fun () ->
+        logger:notice("Hello ~p", [world]),
+        throw(foo)
+    end),
+    ?assertMatch({throw, foo, _Trace, [{notice, [], "Hello world"}]}, Result).
+
+-endif.
