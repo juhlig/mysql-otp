@@ -19,7 +19,8 @@
                              {error_report|warning_report|info_report, term()}].
 capture(Fun) when is_function(Fun, 0) ->
     Tag = make_ref(),
-    AccPid = spawn_link(fun() -> log_acc_loop(Tag, []) end),
+    Self = self(),
+    AccPid = spawn_link(fun() -> log_acc_loop(Tag, Self) end),
     logger:add_primary_filter(?MODULE, {fun(Event, _)-> AccPid ! {Tag, Event}, stop end, undefined}),
     try
         Fun()
@@ -37,7 +38,7 @@ capture(Fun) when is_function(Fun, 0) ->
 
 flush_logs(AccPid, Tag) ->
     AccMon = monitor(process, AccPid),
-    AccPid ! {Tag, flush, self()},
+    AccPid ! {Tag, flush},
     receive
         {Tag, Events} ->
             demonitor(AccMon, [flush]),
@@ -46,13 +47,20 @@ flush_logs(AccPid, Tag) ->
             error({accumulator_process, Reason})
     end.
 
-log_acc_loop(Tag, Acc) ->
+log_acc_loop(Tag, Parent) ->
+    log_acc_loop(Tag, Parent, open, []).
+
+log_acc_loop(Tag, Parent, Status, Acc) ->
+    Timeout = case Status of
+        open -> infinity;
+	closing -> 1000
+    end,
     receive
-        {Tag, flush, ReplyTo} ->
-            ReplyTo ! {Tag, lists:reverse(Acc)};
+        {Tag, flush} when Status =:= open ->
+            log_acc_loop(Tag, Parent, closing, Acc);
         {Tag, #{level := Level, msg := Msg} = Event} ->
             Domain = case Event of
-                         #{meta := #{domain := D}} -> D;
+                         #{meta := #{domain := Dom}} -> Dom;
                          #{} -> []
                      end,
             Message = case Msg of
@@ -60,9 +68,13 @@ log_acc_loop(Tag, Acc) ->
                           {report, Report} -> Report;
                           {Fmt, Args} -> lists:flatten(io_lib:format(Fmt, Args))
                       end,
-            log_acc_loop(Tag, [{Level, Domain, Message} | Acc]);
-        _Other ->
-            log_acc_loop(Tag, Acc)
+            log_acc_loop(Tag, Parent, Status, [{Level, Domain, Message} | Acc]);
+        Other ->
+            error({unexpected_message, Other})
+    after Timeout ->
+        Parent ! {Tag, lists:reverse(Acc)},
+	unlink(Parent),
+	ok
     end.
 
 -ifdef(TEST).
