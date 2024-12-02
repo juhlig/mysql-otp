@@ -35,3 +35,23 @@ jobs:
           export MYSQL_VERSION=${{ matrix.image[1] }}
           make tests-prep
           make tests
+  dialyzer:
+    name: OTP ${{matrix.otp[0]}}
+    runs-on: ${{matrix.os}}
+    strategy:
+      fail-fast: false
+      matrix:
+        otp:
+          - [24, "3.21.0"]
+          - [25, "3.24.0"]
+          - [26, "3.24.0"]
+          - [27, "3.24.0"]
+        os: [ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: ${{matrix.otp[0]}}
+          rebar3-version: ${{matrix.otp[1]}}
+      - name: Run tests
+        run: make dialyze
